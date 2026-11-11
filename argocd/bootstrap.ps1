@@ -70,6 +70,20 @@ try {
         $command += " && kubectl wait --for=jsonpath='{.status.phase}'=Complete azureappconfigurationprovider/lovable-appconfig --namespace lovable --timeout=600s && kubectl get configmap lovable-config --namespace lovable -o name"
     }
 
+    $authorizationWait = @'
+attempt=0
+until kubectl auth can-i get customresourcedefinitions.apiextensions.k8s.io; do
+    if [ "$attempt" -ge 30 ]; then
+        echo "Bootstrap identity cannot read cluster-scoped CRDs after 300 seconds. Verify its Azure Kubernetes Service RBAC Cluster Admin assignment on this AKS cluster." >&2
+        exit 1
+    fi
+    echo "Waiting for AKS Kubernetes RBAC propagation..."
+    sleep 10
+    attempt=$((attempt + 1))
+done
+'@
+    $command = "$authorizationWait`n$command"
+
     $result = Invoke-AzAksRunCommand -ResourceGroupName $ResourceGroupName -Name $ClusterName `
         -Command $command `
         -CommandContextAttachmentZip $attachmentPath -Force -ErrorAction Stop

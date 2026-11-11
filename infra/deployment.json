@@ -166,6 +166,7 @@
     "bootstrapIdentityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('bootstrapIdentityName'))]",
     "bootstrapRunCommandRoleName": "[guid(resourceGroup().id, 'argocd-bootstrap-run-command')]",
     "bootstrapRunCommandRoleAssignmentName": "[guid(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), variables('bootstrapIdentityId'), variables('bootstrapRunCommandRoleName'))]",
+    "bootstrapClusterAdminRoleAssignmentName": "[guid(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), variables('bootstrapIdentityId'), 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b')]",
     "bootstrapReaderRoleAssignmentName": "[guid(resourceGroup().id, variables('bootstrapIdentityId'), 'acdd72a7-3385-48ef-bd42-f606fba81ae7')]",
     "networkSubscriptionId": "[split(parameters('virtual_network_id'), '/')[2]]",
     "networkResourceGroupName": "[if(empty(parameters('network_resource_group_name')), resourceGroup().name, parameters('network_resource_group_name'))]",
@@ -272,6 +273,21 @@
       ],
       "properties": {
         "roleDefinitionId": "[resourceId('Microsoft.Authorization/roleDefinitions', variables('bootstrapRunCommandRoleName'))]",
+        "principalId": "[reference(variables('bootstrapIdentityId'), '2024-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('bootstrapClusterAdminRoleAssignmentName')]",
+      "scope": "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('bootstrapIdentityName'))]",
+        "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b')]",
         "principalId": "[reference(variables('bootstrapIdentityId'), '2024-11-30').principalId]",
         "principalType": "ServicePrincipal"
       }
@@ -847,6 +863,7 @@
         "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', variables('appConfigurationIdentityName'), 'aks-appconfiguration')]",
         "[extensionResourceId(resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName')), 'Microsoft.Authorization/roleAssignments', variables('appConfigurationReaderRoleAssignmentName'))]",
         "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.Authorization/roleAssignments', variables('bootstrapRunCommandRoleAssignmentName'))]",
+        "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.Authorization/roleAssignments', variables('bootstrapClusterAdminRoleAssignmentName'))]",
         "[resourceId('Microsoft.Authorization/roleAssignments', variables('bootstrapReaderRoleAssignmentName'))]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'bootstrapToken')]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'GAR-serviceKey')]",

@@ -11,7 +11,7 @@ The root tracks `main` in this repository. Argo CD renders the parent chart into
 
 - Argo CD installed in the `argocd` namespace, including its Application CRD.
 - PowerShell with the `Az.ContainerRegistry` and `Az.Aks` modules, signed in to the intended subscription when running bootstrap locally.
-- Permission to read container registries in the AKS resource group and invoke/read AKS Run Command results on the intended cluster.
+- Permission to read container registries in the AKS resource group, invoke/read AKS Run Command results, and access Kubernetes resources on the intended cluster. On this Azure-RBAC-enabled cluster, bootstrap uses **Azure Kubernetes Service RBAC Cluster Admin** at the AKS resource scope.
 - Argo CD configured with Git repository credentials if this repository is private.
 - A private container image and a registry pull secret provisioned separately.
 
@@ -56,7 +56,10 @@ The ARM template includes an `AzurePowerShell` deployment script that downloads 
 The deployment script service signs in with a separate user-assigned managed identity. This is not an identity for the Argo CD extension. The bootstrap identity receives:
 
 - Resource-group **Reader**, to discover the only ACR's login server.
-- A custom role assigned only to this AKS cluster, allowing cluster read, `runcommand/action`, and `commandResults/read`. It cannot update or delete the Azure AKS resource. Run Command itself executes privileged Kubernetes operations, so treat access to this identity as cluster-admin-equivalent.
+- A custom role assigned only to this AKS cluster, allowing cluster read, `runcommand/action`, and `commandResults/read`. These management-plane permissions authorize command invocation, not the Kubernetes operations inside it.
+- **Azure Kubernetes Service RBAC Cluster Admin** (`b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b`), assigned only to this AKS cluster. This supplies Kubernetes data-plane access for cluster-scoped CRD reads/watches, namespace creation/update, service-account and custom-resource creation/update, and synchronization checks. It grants full control of Kubernetes resources in all namespaces; restrict access to this identity and the bootstrap artifacts. It does not allow updating or deleting the Azure AKS resource. This is not the similarly named **Azure Kubernetes Service Cluster Admin Role**, which only grants admin credential retrieval and is unsuitable when local accounts are disabled.
+
+The script explicitly depends on the data-plane role assignment. Role-assignment completion does not mean authorization has propagated: bootstrap polls CRD-read authorization for up to five minutes before accessing either CRD, then fails with an explicit RBAC diagnostic if access is still denied. See [AKS Kubernetes authorization](https://learn.microsoft.com/azure/aks/manage-azure-rbac) for the distinction between management-plane and Kubernetes permissions.
 
 The template's deployment principal must be able to create custom roles and role assignments, assign the managed identity (Managed Identity Operator or equivalent), and create deployment scripts plus their supporting storage account and container instance. Register `Microsoft.ManagedIdentity`, `Microsoft.Authorization`, `Microsoft.Resources`, `Microsoft.Storage`, and `Microsoft.ContainerInstance`, in addition to the AKS/extension providers, where required.
 
@@ -68,6 +71,15 @@ Parameters:
 The script uses `Get-AzContainerRegistry` and `Invoke-AzAksRunCommand`, so it needs neither Azure CLI nor local Kubernetes credentials. The rendered manifests are uploaded as a ZIP attachment. The in-cluster command waits for the CRDs, applies the App Configuration resources and root Application, and checks their results; both failed operations and nonzero remote exit codes fail the deployment script. Temporary attachment files are removed even on failure. This verifies creation of the root Application and initial App Configuration synchronization, not successful synchronization of every child workload.
 
 Run Command requires schedulable cluster capacity and is subject to AKS command-pod scheduling/time limits. The deployment script uses public Azure management endpoints rather than connecting directly to the private API. Supporting execution resources are cleaned up on success and retained temporarily on failure for diagnostics.
+
+### Deployment failure checklist
+
+- `Forbidden` on a CRD with "User does not have access to the resource in Azure" indicates missing Kubernetes data-plane authorization, not a private-network connectivity failure. Verify the denied object ID matches the bootstrap managed identity's **principal ID** and that its RBAC Cluster Admin assignment is at the AKS resource scope. Keep both that assignment and the Run Command custom role.
+- Publish the updated bootstrap script and both YAML manifests at `bootstrap_artifacts_base_uri`, then redeploy the updated ARM template. The default `bootstrap_force_update_tag` reruns the script; change it explicitly if you previously pinned it. An old downloaded script will not include the authorization wait.
+- Both extension installations must succeed and establish their CRDs. The bootstrap still waits for CRD establishment after authorization is available.
+- App Configuration additionally needs the existing OIDC/workload-identity settings, exact federated service-account subject, store-scoped Data Reader assignment, and outbound HTTPS/DNS access to Microsoft Entra and the store. Its separate synchronization wait covers initial authentication/reconciliation; cluster-admin access does not grant store data access.
+- The Run Command pod needs schedulable CPU/memory, no blocking taint or admission policy, and working cluster networking. Deployment-script execution needs access to Azure management endpoints and the HTTPS bootstrap artifacts. Microsoft [documents Run Command as not intended for programmatic access](https://learn.microsoft.com/azure/aks/access-private-cluster#limitations-and-considerations); this template retains the requested mechanism, but sustained automation should use a runner with private API connectivity.
+- Private Git credentials, the actual workload image, and its configured pull secret remain separate prerequisites. Bootstrap verifies the root Application and App Configuration synchronization, not child-Application health.
 
 ## Configure the first component
 

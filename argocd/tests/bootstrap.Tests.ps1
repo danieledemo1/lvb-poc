@@ -108,6 +108,14 @@ if (-not $request.Manifest.Contains("value: 'example.azurecr.io'") -or $request.
 if (-not $request.Command.Contains('kubectl apply -f application.yaml') -or -not $request.Command.Contains('kubectl get application lovable-components --namespace argocd')) {
     throw 'AKS Run Command must apply and verify the root Application.'
 }
+foreach ($expected in @('until kubectl auth can-i get customresourcedefinitions.apiextensions.k8s.io', '"$attempt" -ge 30', 'sleep 10', 'exit 1')) {
+    if (-not $request.Command.Contains($expected)) {
+        throw "Bootstrap must wait for Kubernetes RBAC propagation with a bounded failure: missing '$expected'."
+    }
+}
+if ($request.Command.IndexOf('kubectl auth can-i') -gt $request.Command.IndexOf('kubectl wait')) {
+    throw 'Bootstrap must verify Kubernetes authorization before accessing CRDs.'
+}
 if ($output -ne $azureState.Result.Logs -or (Test-Path -LiteralPath (Split-Path $request.AttachmentPath))) {
     throw 'Bootstrap must return remote logs and remove its temporary attachments.'
 }
@@ -184,4 +192,21 @@ foreach ($case in $cases) {
     }
 }
 
-Write-Output 'PASS: registry discovery, render-only mode, private-cluster Run Command, App Configuration rendering and synchronization checks, remote failures, and cleanup.'
+$deployment = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\infra\deployment.json') -Raw | ConvertFrom-Json
+$clusterAdminAssignment = @($deployment.resources | Where-Object {
+    $_.type -eq 'Microsoft.Authorization/roleAssignments' -and
+    $_.properties.roleDefinitionId -eq "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b')]"
+})
+if ($clusterAdminAssignment.Count -ne 1 -or
+    $clusterAdminAssignment[0].scope -ne "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]" -or
+    $clusterAdminAssignment[0].properties.principalId -ne "[reference(variables('bootstrapIdentityId'), '2024-11-30').principalId]") {
+    throw 'Bootstrap requires Kubernetes data-plane cluster-admin access scoped only to its AKS cluster and assigned to its managed identity.'
+}
+$deploymentScript = $deployment.resources | Where-Object { $_.type -eq 'Microsoft.Resources/deploymentScripts' }
+$assignmentDependency = "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.Authorization/roleAssignments', variables('bootstrapClusterAdminRoleAssignmentName'))]"
+if ($clusterAdminAssignment[0].name -ne "[variables('bootstrapClusterAdminRoleAssignmentName')]" -or
+    $deploymentScript.dependsOn -notcontains $assignmentDependency) {
+    throw 'The deployment script must depend on its Kubernetes data-plane role assignment.'
+}
+
+Write-Output 'PASS: registry discovery, render-only mode, private-cluster Run Command, Kubernetes RBAC and propagation checks, App Configuration rendering and synchronization checks, remote failures, and cleanup.'
