@@ -16,6 +16,24 @@ The root tracks `main` in this repository. Argo CD renders the parent chart into
 
 The root uses the `default` Argo CD project. App-of-apps repositories are an admin-level trust boundary; restrict write access and review changes before syncing.
 
+## AKS Argo CD extension
+
+`infra/deployment.json` installs the `Microsoft.ArgoCD` GitOps cluster extension in the `argocd` namespace after the AKS cluster is created. Register the `Microsoft.KubernetesConfiguration` resource provider before deployment and ensure the deployment principal has permission to create Kubernetes extensions.
+
+The extension has no managed identity or workload identity configuration and no Entra SSO integration. The AKS cluster's existing managed identity and workload identity support remain unchanged. Argo CD ingress is disabled and its server uses a `ClusterIP` service; the cluster's separate Istio ingress configuration is unchanged.
+
+Redis HA is disabled to fit the initial three-node pool (the extension's default HA installation requires four nodes). Global tolerations allow the Argo CD components to run on the existing `CriticalAddonsOnly`-tainted system pool.
+
+Access the UI locally using port forwarding from a machine that can reach the Kubernetes API:
+
+```powershell
+kubectl --namespace argocd port-forward service/argocd-server 8080:443
+```
+
+Open `https://localhost:8080` and authenticate using Argo CD's local admin credentials, retrieved through your approved secret-access process. The initial server certificate is self-signed. The extension installs Argo CD only; run the bootstrap script below separately to create this repository's root Application.
+
+See the [Azure Argo CD extension documentation](https://learn.microsoft.com/azure/azure-arc/kubernetes/tutorial-use-gitops-argocd) for prerequisites and supported configuration.
+
 ## Configure the first component
 
 Edit `lovable-components/workloads/first-component/values.yaml`:

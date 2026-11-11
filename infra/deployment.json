@@ -2,7 +2,7 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, Key Vault, App Configuration and a public Container Registry with authenticated Google Artifact Registry caching. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create role assignments at the referenced network scopes, Key Vault and Container Registry.",
+    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, the Argo CD GitOps extension without ingress or an extension identity, Key Vault, App Configuration and a public Container Registry with authenticated Google Artifact Registry caching. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create role assignments at the referenced network scopes, Key Vault and Container Registry, and to create Kubernetes extensions.",
     "sourceDifferences": "Resource group creation is replaced by the deployment scope. User pools and firewall resources are omitted. Terraform's zero drain timeout is omitted because the AKS API requires 1-1440 minutes; the service default applies. The system pool retains its CriticalAddonsOnly taint. As with other ARM deployments, redeployment reapplies the declared initial node count."
   },
   "parameters": {
@@ -488,6 +488,34 @@
               ]
             }
           }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.KubernetesConfiguration/extensions",
+      "apiVersion": "2024-11-01",
+      "name": "argocd",
+      "scope": "[format('Microsoft.ContainerService/managedClusters/{0}', variables('clusterName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]"
+      ],
+      "properties": {
+        "extensionType": "Microsoft.ArgoCD",
+        "autoUpgradeMinorVersion": true,
+        "releaseTrain": "Stable",
+        "scope": {
+          "cluster": {
+            "releaseNamespace": "argocd"
+          }
+        },
+        "configurationSettings": {
+          "server.ingress.enabled": "false",
+          "server.service.type": "ClusterIP",
+          "azure.workloadIdentity.enabled": "false",
+          "redis-ha.enabled": "false",
+          "global.tolerations[0].key": "CriticalAddonsOnly",
+          "global.tolerations[0].operator": "Exists",
+          "global.tolerations[0].effect": "NoSchedule"
         }
       }
     },
