@@ -1,40 +1,88 @@
 $ErrorActionPreference = 'Stop'
 $bootstrap = Join-Path $PSScriptRoot '..\bootstrap.ps1'
 $azureState = @{
-    ExitCode = 0
-    Output = '["example.azurecr.io"]'
-    Arguments = @()
+    Registries = @([pscustomobject]@{ LoginServer = 'example.azurecr.io' })
+    RegistryError = $null
+    RegistryResourceGroup = $null
+    InvokeError = $null
+    InvokeCount = 0
+    Result = [pscustomobject]@{ ProvisioningState = 'Succeeded'; ExitCode = 0; Logs = 'application.argoproj.io/lovable-components' }
+    Request = $null
 }
 
-function az {
-    $azureState.Arguments = @($args)
-    $global:LASTEXITCODE = $azureState.ExitCode
-    Write-Output $azureState.Output
+function Get-AzContainerRegistry {
+    [CmdletBinding()]
+    param([string]$ResourceGroupName)
+
+    $azureState.RegistryResourceGroup = $ResourceGroupName
+    if ($azureState.RegistryError) {
+        throw $azureState.RegistryError
+    }
+    $azureState.Registries
+}
+
+function Invoke-AzAksRunCommand {
+    [CmdletBinding()]
+    param(
+        [string]$ResourceGroupName,
+        [string]$Name,
+        [string]$Command,
+        [string]$CommandContextAttachmentZip,
+        [switch]$Force
+    )
+
+    $azureState.InvokeCount++
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($CommandContextAttachmentZip)
+    try {
+        $reader = [System.IO.StreamReader]::new($archive.GetEntry('application.yaml').Open())
+        try {
+            $azureState.Request = @{
+                ResourceGroupName = $ResourceGroupName
+                ClusterName = $Name
+                Command = $Command
+                Manifest = $reader.ReadToEnd()
+                AttachmentPath = $CommandContextAttachmentZip
+                Force = $Force.IsPresent
+            }
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $archive.Dispose()
+    }
+
+    if ($azureState.InvokeError) {
+        throw $azureState.InvokeError
+    }
+    $azureState.Result
 }
 
 function kubectl {
-    throw 'Render-only bootstrap must not call kubectl.'
+    throw 'Bootstrap must not call local kubectl.'
+}
+
+function az {
+    throw 'Bootstrap must use the PowerShell-native Azure commands.'
 }
 
 $manifest = & $bootstrap -ResourceGroupName 'test-resource-group' -RenderOnly
 if (-not $manifest.Contains("value: 'example.azurecr.io'") -or $manifest.Contains('${REGISTRY_URL}')) {
     throw 'Bootstrap did not render the discovered registry login server.'
 }
-if (($azureState.Arguments -join ' ') -ne 'acr list --resource-group test-resource-group --query [].loginServer --output json --only-show-errors') {
-    throw 'Registry discovery did not use the requested resource group and login-server query.'
+if ($azureState.RegistryResourceGroup -ne 'test-resource-group' -or $azureState.InvokeCount -ne 0) {
+    throw 'Render-only bootstrap must scope registry discovery to the requested group without invoking AKS.'
 }
 
 $cases = @(
-    @{ Output = '[]'; ExitCode = 0; Error = '*found 0*' }
-    @{ Output = '["one.azurecr.io","two.azurecr.io"]'; ExitCode = 0; Error = '*found 2*' }
-    @{ Output = ''; ExitCode = 1; Error = '*Azure CLI exit code 1*' }
-    @{ Output = '["https://example.azurecr.io"]'; ExitCode = 0; Error = '*login server must be a hostname*' }
-    @{ Output = 'not-json'; ExitCode = 0; Error = '*JSON*' }
+    @{ Registries = @(); Error = '*found 0*' }
+    @{ Registries = @([pscustomobject]@{ LoginServer = 'one.azurecr.io' }, [pscustomobject]@{ LoginServer = 'two.azurecr.io' }); Error = '*found 2*' }
+    @{ Registries = @(); RegistryError = 'Registry lookup denied'; Error = '*Registry lookup denied*' }
+    @{ Registries = @([pscustomobject]@{ LoginServer = 'https://example.azurecr.io' }); Error = '*login server must be a hostname*' }
 )
 
 foreach ($case in $cases) {
-    $azureState.Output = $case.Output
-    $azureState.ExitCode = $case.ExitCode
+    $azureState.Registries = $case.Registries
+    $azureState.RegistryError = $case.RegistryError
     $failure = $null
     try {
         $null = & $bootstrap -ResourceGroupName 'test-resource-group' -RenderOnly
@@ -43,8 +91,51 @@ foreach ($case in $cases) {
     }
 
     if ($null -eq $failure -or $failure.Exception.Message -notlike $case.Error) {
-        throw "Expected failure '$($case.Error)' for registry output '$($case.Output)'; received '$failure'."
+        throw "Expected registry discovery failure '$($case.Error)'; received '$failure'."
     }
 }
 
-Write-Output 'PASS: registry discovery, resource-group scoping, rendering, and discovery failure cases.'
+$azureState.Registries = @([pscustomobject]@{ LoginServer = 'example.azurecr.io' })
+$azureState.RegistryError = $null
+$output = & $bootstrap -ResourceGroupName 'test-resource-group' -ClusterName 'test-cluster'
+$request = $azureState.Request
+if ($request.ResourceGroupName -ne 'test-resource-group' -or $request.ClusterName -ne 'test-cluster' -or -not $request.Force) {
+    throw 'AKS Run Command was not scoped to the requested cluster or was not noninteractive.'
+}
+if (-not $request.Manifest.Contains("value: 'example.azurecr.io'") -or $request.Manifest.Contains('${REGISTRY_URL}')) {
+    throw 'AKS Run Command did not receive the rendered Application manifest.'
+}
+if (-not $request.Command.Contains('kubectl apply -f application.yaml') -or -not $request.Command.Contains('kubectl get application lovable-components --namespace argocd')) {
+    throw 'AKS Run Command must apply and verify the root Application.'
+}
+if ($output -ne $azureState.Result.Logs -or (Test-Path -LiteralPath (Split-Path $request.AttachmentPath))) {
+    throw 'Bootstrap must return remote logs and remove its temporary attachments.'
+}
+
+$cases = @(
+    @{ Result = [pscustomobject]@{ ProvisioningState = 'Succeeded'; ExitCode = 1; Logs = 'kubectl apply failed' }; Error = '*exit code ''1''*kubectl apply failed*' }
+    @{ Result = [pscustomobject]@{ ProvisioningState = 'Failed'; ExitCode = 0; Logs = 'Run Command failed' }; Error = '*state ''Failed''*' }
+    @{ Result = [pscustomobject]@{ ProvisioningState = 'Succeeded'; ExitCode = $null; Logs = '' }; Error = '*AKS Run Command failed*' }
+    @{ Result = $null; Error = '*AKS Run Command failed*' }
+    @{ InvokeError = 'Run Command access denied'; Error = '*Run Command access denied*' }
+)
+
+foreach ($case in $cases) {
+    $azureState.Result = $case.Result
+    $azureState.InvokeError = $case.InvokeError
+    $failure = $null
+    try {
+        $null = & $bootstrap -ResourceGroupName 'test-resource-group' -ClusterName 'test-cluster'
+    } catch {
+        $failure = $_
+    }
+
+    if ($null -eq $failure -or $failure.Exception.Message -notlike $case.Error) {
+        throw "Expected Run Command failure '$($case.Error)'; received '$failure'."
+    }
+    if (Test-Path -LiteralPath (Split-Path $azureState.Request.AttachmentPath)) {
+        throw 'Bootstrap did not clean up temporary files after Run Command failed.'
+    }
+}
+
+Write-Output 'PASS: registry discovery, render-only mode, private-cluster Run Command, remote failures, and temporary-file cleanup.'

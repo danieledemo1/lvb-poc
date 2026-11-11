@@ -2,8 +2,8 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, the Argo CD GitOps extension without ingress or an extension identity, Key Vault, App Configuration and a public Container Registry with authenticated Google Artifact Registry caching. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create role assignments at the referenced network scopes, Key Vault and Container Registry, and to create Kubernetes extensions.",
-    "sourceDifferences": "Resource group creation is replaced by the deployment scope. User pools and firewall resources are omitted. Terraform's zero drain timeout is omitted because the AKS API requires 1-1440 minutes; the service default applies. The system pool retains its CriticalAddonsOnly taint. As with other ARM deployments, redeployment reapplies the declared initial node count."
+    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, the Argo CD GitOps extension without ingress or an extension identity, Key Vault, App Configuration and a public Container Registry with authenticated Google Artifact Registry caching. A post-deployment script uses a dedicated user-assigned identity to bootstrap the root Argo CD Application through AKS Run Command. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create custom roles and role assignments at the referenced scopes, Kubernetes extensions, deployment scripts and their supporting storage/container resources, and to assign the bootstrap managed identity.",
+    "sourceDifferences": "Resource group creation is replaced by the deployment scope. User pools and firewall resources are omitted. Terraform's zero drain timeout is omitted because the AKS API requires 1-1440 minutes; the service default applies. The system pool is untainted so that AKS Run Command pods can schedule. As with other ARM deployments, redeployment reapplies the declared initial node count."
   },
   "parameters": {
     "deployment_id": {
@@ -115,6 +115,21 @@
         "description": "Globally unique Container Registry name, using 5-50 alphanumeric characters. Empty generates a deterministic name from the resource group and deployment identifier."
       }
     },
+    "bootstrap_artifacts_base_uri": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/danieledemo1/lvb-poc/main/argocd",
+      "minLength": 1,
+      "metadata": {
+        "description": "Publicly accessible HTTPS base URI containing bootstrap.ps1 and application.yaml, without a trailing slash. Pin a commit-specific URI for reproducible deployments."
+      }
+    },
+    "bootstrap_force_update_tag": {
+      "type": "string",
+      "defaultValue": "[utcNow()]",
+      "metadata": {
+        "description": "Changing this value reruns the Argo CD bootstrap deployment script. The default reruns it on every deployment."
+      }
+    },
     "bootstrapToken": {
       "type": "secureString",
       "minLength": 1,
@@ -147,6 +162,11 @@
     "clusterName": "[if(empty(parameters('aks_cluster_name')), format('aks-lvbdev-plat-{0}-01', parameters('deployment_id')), parameters('aks_cluster_name'))]",
     "identityName": "[if(empty(parameters('aks_identity_name')), format('id-lvbdev-plat-aks-{0}-01', parameters('deployment_id')), parameters('aks_identity_name'))]",
     "identityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]",
+    "bootstrapIdentityName": "[format('id-lvbdev-plat-bootstrap-{0}-01', parameters('deployment_id'))]",
+    "bootstrapIdentityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('bootstrapIdentityName'))]",
+    "bootstrapRunCommandRoleName": "[guid(resourceGroup().id, 'argocd-bootstrap-run-command')]",
+    "bootstrapRunCommandRoleAssignmentName": "[guid(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), variables('bootstrapIdentityId'), variables('bootstrapRunCommandRoleName'))]",
+    "bootstrapReaderRoleAssignmentName": "[guid(resourceGroup().id, variables('bootstrapIdentityId'), 'acdd72a7-3385-48ef-bd42-f606fba81ae7')]",
     "networkSubscriptionId": "[split(parameters('virtual_network_id'), '/')[2]]",
     "networkResourceGroupName": "[if(empty(parameters('network_resource_group_name')), resourceGroup().name, parameters('network_resource_group_name'))]",
     "istioPublicIpName": "[if(empty(parameters('istio_external_lb_pip_name')), format('pip-lvbdev-plat-istio-{0}-01', parameters('deployment_id')), parameters('istio_external_lb_pip_name'))]",
@@ -166,6 +186,67 @@
       "name": "[variables('identityName')]",
       "location": "[parameters('location')]",
       "tags": "[variables('tags')]"
+    },
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2024-11-30",
+      "name": "[variables('bootstrapIdentityName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]"
+    },
+    {
+      "type": "Microsoft.Authorization/roleDefinitions",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('bootstrapRunCommandRoleName')]",
+      "properties": {
+        "roleName": "[format('Argo CD Bootstrap Run Command ({0})', uniqueString(resourceGroup().id))]",
+        "description": "Read the AKS cluster, invoke Run Command and retrieve its result to bootstrap Argo CD.",
+        "type": "CustomRole",
+        "permissions": [
+          {
+            "actions": [
+              "Microsoft.ContainerService/managedClusters/read",
+              "Microsoft.ContainerService/managedClusters/runcommand/action",
+              "Microsoft.ContainerService/managedClusters/commandResults/read"
+            ],
+            "notActions": [],
+            "dataActions": [],
+            "notDataActions": []
+          }
+        ],
+        "assignableScopes": [
+          "[resourceGroup().id]"
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('bootstrapRunCommandRoleAssignmentName')]",
+      "scope": "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('bootstrapIdentityName'))]",
+        "[resourceId('Microsoft.Authorization/roleDefinitions', variables('bootstrapRunCommandRoleName'))]",
+        "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[resourceId('Microsoft.Authorization/roleDefinitions', variables('bootstrapRunCommandRoleName'))]",
+        "principalId": "[reference(variables('bootstrapIdentityId'), '2024-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('bootstrapReaderRoleAssignmentName')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('bootstrapIdentityName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')]",
+        "principalId": "[reference(variables('bootstrapIdentityId'), '2024-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
     },
     {
       "type": "Microsoft.Resources/deployments",
@@ -431,9 +512,7 @@
             "mode": "System",
             "type": "VirtualMachineScaleSets",
             "vnetSubnetID": "[parameters('system_nodepool_subnet_id')]",
-            "nodeTaints": [
-              "CriticalAddonsOnly=true:NoSchedule"
-            ],
+            "nodeTaints": [],
             "osType": "Linux",
             "osSKU": "AzureLinux3",
             "count": 3,
@@ -682,6 +761,43 @@
       "properties": {
         "value": "[parameters('lovableVersion')]",
         "contentType": "text/plain"
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deploymentScripts",
+      "apiVersion": "2023-08-01",
+      "name": "[format('argocd-bootstrap-{0}', uniqueString(resourceGroup().id, parameters('deployment_id')))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "kind": "AzurePowerShell",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[variables('bootstrapIdentityId')]": {}
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.KubernetesConfiguration/extensions', 'argocd')]",
+        "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.Authorization/roleAssignments', variables('bootstrapRunCommandRoleAssignmentName'))]",
+        "[resourceId('Microsoft.Authorization/roleAssignments', variables('bootstrapReaderRoleAssignmentName'))]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'bootstrapToken')]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'GAR-serviceKey')]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'GAR-username')]",
+        "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), '7f951dda-4ed3-4680-a7ca-43fe172d538d'))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries/cacheRules', variables('containerRegistryName'), 'lovable-gar')]",
+        "[resourceId('Microsoft.AppConfiguration/configurationStores/keyValues', variables('appConfigurationName'), 'lovableVersion')]"
+      ],
+      "properties": {
+        "azPowerShellVersion": "16.2",
+        "primaryScriptUri": "[format('{0}/bootstrap.ps1', parameters('bootstrap_artifacts_base_uri'))]",
+        "supportingScriptUris": [
+          "[format('{0}/application.yaml', parameters('bootstrap_artifacts_base_uri'))]"
+        ],
+        "arguments": "[format('-ResourceGroupName \"{0}\" -ClusterName \"{1}\"', resourceGroup().name, variables('clusterName'))]",
+        "forceUpdateTag": "[parameters('bootstrap_force_update_tag')]",
+        "timeout": "PT30M",
+        "cleanupPreference": "OnSuccess",
+        "retentionInterval": "P1D"
       }
     }
   ],
