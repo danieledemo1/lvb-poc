@@ -1,0 +1,694 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, Key Vault, App Configuration and a public Container Registry with authenticated Google Artifact Registry caching. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create role assignments at the referenced network scopes, Key Vault and Container Registry.",
+    "sourceDifferences": "Resource group creation is replaced by the deployment scope. User pools and firewall resources are omitted. Terraform's zero drain timeout is omitted because the AKS API requires 1-1440 minutes; the service default applies. The system pool retains its CriticalAddonsOnly taint. As with other ARM deployments, redeployment reapplies the declared initial node count."
+  },
+  "parameters": {
+    "deployment_id": {
+      "type": "string",
+      "minLength": 1,
+      "metadata": {
+        "description": "Deployment identifier used for resource naming and the cluster DNS prefix."
+      }
+    },
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure region for the cluster and supporting platform resources."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Resource tags."
+      }
+    },
+    "network_resource_group_name": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Existing resource group for private DNS and the optional external Istio public IP, in the virtual network's subscription. Empty uses resourceGroup().name."
+      }
+    },
+    "virtual_network_id": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the existing virtual network, used for the private AKS DNS link."
+      }
+    },
+    "apiserver_subnet_id": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of an existing subnet delegated to Microsoft.ContainerService/managedClusters for API Server VNet Integration."
+      }
+    },
+    "system_nodepool_subnet_id": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the existing system-node subnet. It must support load-balancer egress rather than forced tunneling through a firewall."
+      }
+    },
+    "availability_zones": {
+      "type": "string",
+      "defaultValue": "1,2,3",
+      "metadata": {
+        "description": "Comma-separated supported availability zones, without spaces, for example 1,2,3."
+      }
+    },
+    "aks_cluster_name": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "AKS cluster name. Empty uses aks-lvbdev-plat-<deployment_id>-01."
+      }
+    },
+    "aks_node_resource_group_name": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "AKS-managed node resource group name. Empty uses <deployment-resource-group>-aks-nodes. This group must not already exist."
+      }
+    },
+    "aks_identity_name": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Cluster user-assigned identity name. Empty uses id-lvbdev-plat-aks-<deployment_id>-01."
+      }
+    },
+    "kubernetes_version": {
+      "type": "string",
+      "defaultValue": "1.35",
+      "metadata": {
+        "description": "AKS Kubernetes version. The version and the source Istio revision asm-1-30 must be supported in the selected region."
+      }
+    },
+    "cluster_endpoint_public_access": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Expose the Kubernetes API publicly. API Server VNet Integration remains enabled in either mode."
+      }
+    },
+    "cluster_ingress_public_access": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable the external Istio ingress gateway and create its public IP. When false, enable the internal gateway instead."
+      }
+    },
+    "istio_external_lb_pip_name": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Public IP name to create in the network resource group when cluster_ingress_public_access is true. Empty uses pip-lvbdev-plat-istio-<deployment_id>-01. Grants the cluster Network Contributor on that IP. Binding the gateway to that IP requires separate Kubernetes service configuration."
+      }
+    },
+    "acr_name": {
+      "type": "string",
+      "defaultValue": "",
+      "maxLength": 50,
+      "metadata": {
+        "description": "Globally unique Container Registry name, using 5-50 alphanumeric characters. Empty generates a deterministic name from the resource group and deployment identifier."
+      }
+    },
+    "bootstrapToken": {
+      "type": "secureString",
+      "minLength": 1,
+      "metadata": {
+        "description": "Value of the bootstrapToken secret created in Key Vault."
+      }
+    },
+    "serviceKey": {
+      "type": "secureString",
+      "minLength": 1,
+      "metadata": {
+        "description": "Base64-encoded Google Artifact Registry service-account key, stored unchanged in the GAR-serviceKey secret in Key Vault."
+      }
+    },
+    "lovableVersion": {
+      "type": "string",
+      "allowedValues": [
+        "1.0",
+        "1.1",
+        "1.2"
+      ],
+      "defaultValue": "1.2",
+      "metadata": {
+        "description": "Value of the unlabeled lovableVersion key in App Configuration."
+      }
+    }
+  },
+  "variables": {
+    "tags": "[parameters('tags')]",
+    "clusterName": "[if(empty(parameters('aks_cluster_name')), format('aks-lvbdev-plat-{0}-01', parameters('deployment_id')), parameters('aks_cluster_name'))]",
+    "identityName": "[if(empty(parameters('aks_identity_name')), format('id-lvbdev-plat-aks-{0}-01', parameters('deployment_id')), parameters('aks_identity_name'))]",
+    "identityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]",
+    "networkSubscriptionId": "[split(parameters('virtual_network_id'), '/')[2]]",
+    "networkResourceGroupName": "[if(empty(parameters('network_resource_group_name')), resourceGroup().name, parameters('network_resource_group_name'))]",
+    "istioPublicIpName": "[if(empty(parameters('istio_external_lb_pip_name')), format('pip-lvbdev-plat-istio-{0}-01', parameters('deployment_id')), parameters('istio_external_lb_pip_name'))]",
+    "privateDnsZoneName": "[format('private.{0}.azmk8s.io', parameters('location'))]",
+    "privateDnsZoneId": "[resourceId(variables('networkSubscriptionId'), variables('networkResourceGroupName'), 'Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]",
+    "subnetIds": "[union(createArray(parameters('system_nodepool_subnet_id')), createArray(parameters('apiserver_subnet_id')))]",
+    "keyVaultName": "[format('kv-lvb-{0}', uniqueString(resourceGroup().id, parameters('deployment_id')))]",
+    "appConfigurationName": "[format('appcs-lvb-{0}', uniqueString(resourceGroup().id, parameters('deployment_id')))]",
+    "containerRegistryName": "[if(empty(parameters('acr_name')), format('acrlvb{0}', uniqueString(resourceGroup().id, parameters('deployment_id'))), parameters('acr_name'))]",
+    "garCredentialSetName": "gar-credentials",
+    "garSecretsRoleAssignmentName": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), resourceId('Microsoft.ContainerRegistry/registries/credentialSets', variables('containerRegistryName'), variables('garCredentialSetName')), '4633458b-17de-408a-b874-0445c86b69e6')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2024-11-30",
+      "name": "[variables('identityName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]"
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('aks-subnet-permissions-{0}', uniqueString(variables('subnetIds')[copyIndex()]))]",
+      "subscriptionId": "[split(variables('subnetIds')[copyIndex()], '/')[2]]",
+      "resourceGroup": "[split(variables('subnetIds')[copyIndex()], '/')[4]]",
+      "copy": {
+        "name": "aksSubnetPermissions",
+        "count": "[length(variables('subnetIds'))]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "subnetId": {
+            "value": "[variables('subnetIds')[copyIndex()]]"
+          },
+          "identityId": {
+            "value": "[variables('identityId')]"
+          },
+          "principalId": {
+            "value": "[reference(variables('identityId'), '2024-11-30').principalId]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "subnetId": {
+              "type": "string"
+            },
+            "identityId": {
+              "type": "string"
+            },
+            "principalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(parameters('subnetId'), parameters('identityId'), '4d97b98b-1d4f-4787-a291-c67834d212e7')]",
+              "scope": "[parameters('subnetId')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4d97b98b-1d4f-4787-a291-c67834d212e7')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('aks-network-{0}', uniqueString(resourceGroup().id, parameters('deployment_id')))]",
+      "subscriptionId": "[variables('networkSubscriptionId')]",
+      "resourceGroup": "[variables('networkResourceGroupName')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "privateCluster": {
+            "value": "[not(parameters('cluster_endpoint_public_access'))]"
+          },
+          "clusterIngressPublicAccess": {
+            "value": "[parameters('cluster_ingress_public_access')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "zoneName": {
+            "value": "[variables('privateDnsZoneName')]"
+          },
+          "virtualNetworkId": {
+            "value": "[parameters('virtual_network_id')]"
+          },
+          "publicIpName": {
+            "value": "[variables('istioPublicIpName')]"
+          },
+          "identityId": {
+            "value": "[variables('identityId')]"
+          },
+          "principalId": {
+            "value": "[reference(variables('identityId'), '2024-11-30').principalId]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "privateCluster": {
+              "type": "bool"
+            },
+            "clusterIngressPublicAccess": {
+              "type": "bool"
+            },
+            "location": {
+              "type": "string"
+            },
+            "zoneName": {
+              "type": "string"
+            },
+            "virtualNetworkId": {
+              "type": "string"
+            },
+            "publicIpName": {
+              "type": "string"
+            },
+            "identityId": {
+              "type": "string"
+            },
+            "principalId": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            }
+          },
+          "resources": [
+            {
+              "condition": "[parameters('privateCluster')]",
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2024-06-01",
+              "name": "[parameters('zoneName')]",
+              "location": "global",
+              "tags": "[parameters('tags')]"
+            },
+            {
+              "condition": "[parameters('privateCluster')]",
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2024-06-01",
+              "name": "[format('{0}/{1}-link', parameters('zoneName'), replace(parameters('zoneName'), '.', '-'))]",
+              "location": "global",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', parameters('zoneName'))]"
+              ],
+              "properties": {
+                "registrationEnabled": false,
+                "virtualNetwork": {
+                  "id": "[parameters('virtualNetworkId')]"
+                }
+              }
+            },
+            {
+              "condition": "[parameters('privateCluster')]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceId('Microsoft.Network/privateDnsZones', parameters('zoneName')), parameters('identityId'), 'b12aa53e-6015-4669-85d0-8515ebb3ae7f')]",
+              "scope": "[resourceId('Microsoft.Network/privateDnsZones', parameters('zoneName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', parameters('zoneName'))]"
+              ],
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b12aa53e-6015-4669-85d0-8515ebb3ae7f')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "condition": "[parameters('clusterIngressPublicAccess')]",
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2025-05-01",
+              "name": "[parameters('publicIpName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "properties": {
+                "publicIPAllocationMethod": "Static",
+                "publicIPAddressVersion": "IPv4"
+              }
+            },
+            {
+              "condition": "[parameters('clusterIngressPublicAccess')]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName')), parameters('identityId'), '4d97b98b-1d4f-4787-a291-c67834d212e7')]",
+              "scope": "[resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName'))]"
+              ],
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4d97b98b-1d4f-4787-a291-c67834d212e7')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.ContainerService/managedClusters",
+      "apiVersion": "2025-07-01",
+      "name": "[variables('clusterName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "Base",
+        "tier": "Free"
+      },
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[variables('identityId')]": {}
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]",
+        "aksSubnetPermissions",
+        "[resourceId('Microsoft.Resources/deployments', format('aks-network-{0}', uniqueString(resourceGroup().id, parameters('deployment_id'))))]"
+      ],
+      "properties": {
+        "nodeResourceGroup": "[if(empty(parameters('aks_node_resource_group_name')), format('{0}-aks-nodes', resourceGroup().name), parameters('aks_node_resource_group_name'))]",
+        "dnsPrefix": "[parameters('deployment_id')]",
+        "kubernetesVersion": "[parameters('kubernetes_version')]",
+        "disableLocalAccounts": true,
+        "enableRBAC": true,
+        "aadProfile": {
+          "managed": true,
+          "enableAzureRBAC": true,
+          "tenantID": "[subscription().tenantId]"
+        },
+        "oidcIssuerProfile": {
+          "enabled": true
+        },
+        "securityProfile": {
+          "workloadIdentity": {
+            "enabled": true
+          },
+          "imageCleaner": {
+            "enabled": true,
+            "intervalHours": 24
+          }
+        },
+        "autoUpgradeProfile": {
+          "upgradeChannel": "stable",
+          "nodeOSUpgradeChannel": "NodeImage"
+        },
+        "apiServerAccessProfile": "[union(createObject('enablePrivateCluster', not(parameters('cluster_endpoint_public_access')), 'enableVnetIntegration', true(), 'subnetId', parameters('apiserver_subnet_id')), if(parameters('cluster_endpoint_public_access'), createObject(), createObject('privateDNSZone', variables('privateDnsZoneId'))))]",
+        "agentPoolProfiles": [
+          {
+            "name": "system",
+            "mode": "System",
+            "type": "VirtualMachineScaleSets",
+            "vnetSubnetID": "[parameters('system_nodepool_subnet_id')]",
+            "nodeTaints": [
+              "CriticalAddonsOnly=true:NoSchedule"
+            ],
+            "osType": "Linux",
+            "osSKU": "AzureLinux3",
+            "count": 3,
+            "minCount": 3,
+            "maxCount": 5,
+            "enableAutoScaling": true,
+            "vmSize": "Standard_D4ds_v6",
+            "maxPods": 40,
+            "availabilityZones": "[split(parameters('availability_zones'), ',')]",
+            "upgradeSettings": {
+              "maxSurge": "10%",
+              "nodeSoakDurationInMinutes": 0
+            }
+          }
+        ],
+        "nodeProvisioningProfile": {
+          "defaultNodePools": "None",
+          "mode": "Manual"
+        },
+        "networkProfile": {
+          "outboundType": "loadBalancer",
+          "loadBalancerSku": "standard",
+          "loadBalancerProfile": {
+            "managedOutboundIPs": {
+              "count": 1
+            }
+          },
+          "networkPlugin": "azure",
+          "networkPluginMode": "overlay",
+          "networkDataplane": "cilium",
+          "networkPolicy": "cilium",
+          "podCidr": "10.244.0.0/16",
+          "serviceCidr": "10.1.0.0/16",
+          "dnsServiceIP": "10.1.0.10"
+        },
+        "serviceMeshProfile": {
+          "mode": "Istio",
+          "istio": {
+            "revisions": [
+              "asm-1-30"
+            ],
+            "components": {
+              "ingressGateways": [
+                {
+                  "mode": "Internal",
+                  "enabled": "[not(parameters('cluster_ingress_public_access'))]"
+                },
+                {
+                  "mode": "External",
+                  "enabled": "[parameters('cluster_ingress_public_access')]"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2025-05-01",
+      "name": "[variables('keyVaultName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "sku": {
+          "family": "A",
+          "name": "standard"
+        },
+        "accessPolicies": [],
+        "enableRbacAuthorization": true,
+        "enableSoftDelete": true,
+        "publicNetworkAccess": "Enabled",
+        "networkAcls": {
+          "bypass": "AzureServices",
+          "defaultAction": "Allow"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2025-05-01",
+      "name": "[format('{0}/bootstrapToken', variables('keyVaultName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+      ],
+      "properties": {
+        "value": "[parameters('bootstrapToken')]"
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2025-05-01",
+      "name": "[format('{0}/GAR-serviceKey', variables('keyVaultName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+      ],
+      "properties": {
+        "value": "[parameters('serviceKey')]"
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2025-05-01",
+      "name": "[format('{0}/GAR-username', variables('keyVaultName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+      ],
+      "properties": {
+        "value": "_json_key_base64"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2025-11-01",
+      "name": "[variables('containerRegistryName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "adminUserEnabled": false,
+        "anonymousPullEnabled": false,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
+        "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+        "principalId": "[reference(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), '2025-07-01').identityProfile.kubeletidentity.objectId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries/credentialSets",
+      "apiVersion": "2025-11-01",
+      "name": "[format('{0}/{1}', variables('containerRegistryName'), variables('garCredentialSetName'))]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'GAR-username')]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'GAR-serviceKey')]"
+      ],
+      "properties": {
+        "loginServer": "europe-west8-docker.pkg.dev",
+        "authCredentials": [
+          {
+            "name": "Credential1",
+            "usernameSecretIdentifier": "[format('{0}secrets/GAR-username', reference(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), '2025-05-01').vaultUri)]",
+            "passwordSecretIdentifier": "[format('{0}secrets/GAR-serviceKey', reference(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), '2025-05-01').vaultUri)]"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('garSecretsRoleAssignmentName')]",
+      "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries/credentialSets', variables('containerRegistryName'), variables('garCredentialSetName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
+        "principalId": "[reference(resourceId('Microsoft.ContainerRegistry/registries/credentialSets', variables('containerRegistryName'), variables('garCredentialSetName')), '2025-11-01', 'Full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries/cacheRules",
+      "apiVersion": "2025-11-01",
+      "name": "[format('{0}/lovable-gar', variables('containerRegistryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries/credentialSets', variables('containerRegistryName'), variables('garCredentialSetName'))]",
+        "[extensionResourceId(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), 'Microsoft.Authorization/roleAssignments', variables('garSecretsRoleAssignmentName'))]"
+      ],
+      "properties": {
+        "sourceRepository": "europe-west8-docker.pkg.dev/project-5cff0794-34e4-48e2-972/test-gar-lvb/*",
+        "targetRepository": "lovable/*",
+        "credentialSetResourceId": "[resourceId('Microsoft.ContainerRegistry/registries/credentialSets', variables('containerRegistryName'), variables('garCredentialSetName'))]"
+      }
+    },
+    {
+      "type": "Microsoft.AppConfiguration/configurationStores",
+      "apiVersion": "2024-06-01",
+      "name": "[variables('appConfigurationName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "standard"
+      },
+      "properties": {
+        "publicNetworkAccess": "Enabled",
+        "dataPlaneProxy": {
+          "authenticationMode": "Local"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.AppConfiguration/configurationStores/keyValues",
+      "apiVersion": "2024-06-01",
+      "name": "[format('{0}/lovableVersion', variables('appConfigurationName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName'))]"
+      ],
+      "properties": {
+        "value": "[parameters('lovableVersion')]",
+        "contentType": "text/plain"
+      }
+    }
+  ],
+  "outputs": {
+    "aksClusterId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]"
+    },
+    "aksOidcIssuerUrl": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), '2025-07-01').oidcIssuerProfile.issuerURL]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[variables('keyVaultName')]"
+    },
+    "keyVaultUri": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), '2025-05-01').vaultUri]"
+    },
+    "appConfigurationName": {
+      "type": "string",
+      "value": "[variables('appConfigurationName')]"
+    },
+    "appConfigurationEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName')), '2024-06-01').endpoint]"
+    },
+    "containerRegistryName": {
+      "type": "string",
+      "value": "[variables('containerRegistryName')]"
+    },
+    "containerRegistryLoginServer": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), '2025-11-01').loginServer]"
+    }
+  }
+}

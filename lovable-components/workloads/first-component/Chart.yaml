@@ -1,0 +1,5 @@
+apiVersion: v2
+name: first-component
+description: Basic workload using an image from a private registry.
+type: application
+version: 0.1.0

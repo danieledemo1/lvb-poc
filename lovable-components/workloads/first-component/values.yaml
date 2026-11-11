@@ -1,0 +1,14 @@
+replicaCount: 1
+
+image:
+  registry: ""
+  repository: lovable/first-component
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: private-registry
+
+service:
+  port: 80
+  targetPort: 8080

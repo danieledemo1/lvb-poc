@@ -1,0 +1,30 @@
+{{- $registryUrl := required "Set registry.url through the root Application Helm parameters." .Values.registry.url -}}
+{{- range .Values.applications }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  project: default
+  source:
+    repoURL: {{ $.Values.repository.url | quote }}
+    targetRevision: {{ $.Values.repository.revision | quote }}
+    path: {{ .path | quote }}
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: image.registry
+          value: {{ $registryUrl | quote }}
+          forceString: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .namespace }}
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+{{- end }}

@@ -1,0 +1,11 @@
+repository:
+  url: https://github.com/danieledemo1/lvb-poc.git
+  revision: main
+
+registry:
+  url: ""
+
+applications:
+  - name: first-component
+    namespace: lovable
+    path: lovable-components/workloads/first-component
