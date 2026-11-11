@@ -2,8 +2,8 @@ replicaCount: 1
 
 image:
   registry: ""
-  repository: lovable/first-component
-  tag: "0.1.0"
+  repository: lovable/cyber-hello
+  tag: "latest"
   pullPolicy: IfNotPresent
 
 imagePullSecrets:

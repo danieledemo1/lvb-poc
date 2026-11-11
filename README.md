@@ -85,7 +85,7 @@ Run Command requires schedulable cluster capacity and is subject to AKS command-
 
 Edit `lovable-components/workloads/first-component/values.yaml`:
 
-- Set `image.repository` and `image.tag` to your actual private image.
+- The default image is `<registry>/lovable/cyber-hello:latest`; override `image.repository` and `image.tag` if needed.
 - Set `imagePullSecrets` to an existing Kubernetes registry secret.
 - Adjust `service.targetPort` to match the port your image listens on (default: `8080`).
 
@@ -106,7 +106,7 @@ Pass the resource group containing the AKS cluster and its ACR (not the AKS-mana
 
 The ARM deployment additionally supplies `-AppConfigurationEndpoint`, `-AppConfigurationClientId`, and `-AppConfigurationTenantId`. Supply all three together when manually bootstrapping the App Configuration connection; omitting all three preserves root-Application-only bootstrap. These values must correspond to the store and federated identity provisioned by this template.
 
-Argo CD does **not** substitute arbitrary environment variables in Git-hosted Helm values. Instead, the script persists the discovered registry hostname as a Helm parameter on the root Application. The parent chart passes it to each child as `image.registry`; the workload renders an image such as `myregistry.azurecr.io/lovable/first-component:0.1.0`. Registry authentication is handled independently by the workload's `imagePullSecrets`.
+Argo CD does **not** substitute arbitrary environment variables in Git-hosted Helm values. Instead, the script persists the discovered registry hostname as a Helm parameter on the root Application. The parent chart passes it to each child as `image.registry`; the workload renders an image such as `myregistry.azurecr.io/lovable/cyber-hello:latest`. Registry authentication is handled independently by the workload's `imagePullSecrets`.
 
 `REGISTRY_URL` does not need to be set in the local environment. Rerun the bootstrap script to refresh the root Application if the registry changes. No local kubectl context, direct private API access, Argo CD plugin, or repo-server environment changes are required.
 
