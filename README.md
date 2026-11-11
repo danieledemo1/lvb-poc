@@ -2,7 +2,7 @@
 
 This repository contains two main components:
 
-- `argocd/`: root app-of-apps Application template and environment-driven bootstrap script.
+- `argocd/`: root app-of-apps Application template and resource-group-aware bootstrap script.
 - `lovable-components/`: Helm chart rendering the child Argo CD Applications listed in `values.yaml`. Workload charts live under `workloads/`.
 
 The root tracks `main` in this repository. Argo CD renders the parent chart into child Applications, then renders each child's workload chart and values into Kubernetes resources.
@@ -11,6 +11,7 @@ The root tracks `main` in this repository. Argo CD renders the parent chart into
 
 - Argo CD installed in the `argocd` namespace, including its Application CRD.
 - `kubectl` configured for the intended cluster and PowerShell available locally.
+- Azure CLI installed and signed in to the intended subscription, with permission to list container registries in the AKS resource group.
 - Argo CD configured with Git repository credentials if this repository is private.
 - A private container image and a registry pull secret provisioned separately.
 
@@ -46,19 +47,18 @@ Provision the `private-registry` secret in the `lovable` namespace using your se
 
 Push these files to `main` before bootstrapping; Argo CD reads Git, not your local working tree.
 
-## Bootstrap from an environment variable
+## Bootstrap using the resource group's container registry
 
 ```powershell
-$env:REGISTRY_URL = 'registry.example.com'
-.\argocd\bootstrap.ps1 -RenderOnly
-.\argocd\bootstrap.ps1
+.\argocd\bootstrap.ps1 -ResourceGroupName 'my-aks-resource-group' -RenderOnly
+.\argocd\bootstrap.ps1 -ResourceGroupName 'my-aks-resource-group'
 ```
 
-`REGISTRY_URL` is a hostname, optionally with a port, without `https://`, an image path, or a trailing slash. The script replaces only `${REGISTRY_URL}` in the root Application before applying it to the current kubectl context. Do not apply the unrendered template directly.
+Pass the resource group containing the AKS cluster and its ACR (not the AKS-managed node resource group). The script uses `az acr list` in the active Azure CLI subscription and requires exactly one registry in that group. It populates `$registryUrl` from that registry's `loginServer` and replaces only `${REGISTRY_URL}` in the root Application before applying it to the current kubectl context. Zero or multiple registries, Azure CLI errors, or an invalid login server stop the script. `-RenderOnly` still queries Azure but does not apply anything to Kubernetes. Do not apply the unrendered template directly.
 
-Argo CD does **not** substitute arbitrary environment variables in Git-hosted Helm values. Instead, the script persists the registry hostname as a Helm parameter on the root Application. The parent chart passes it to each child as `image.registry`; the workload renders an image such as `registry.example.com/lovable/first-component:0.1.0`. Registry authentication is handled independently by the workload's `imagePullSecrets`.
+Argo CD does **not** substitute arbitrary environment variables in Git-hosted Helm values. Instead, the script persists the discovered registry hostname as a Helm parameter on the root Application. The parent chart passes it to each child as `image.registry`; the workload renders an image such as `myregistry.azurecr.io/lovable/first-component:0.1.0`. Registry authentication is handled independently by the workload's `imagePullSecrets`.
 
-Changing the local environment later has no effect until you rerun the bootstrap script. No Argo CD plugin or repo-server environment changes are required.
+`REGISTRY_URL` no longer needs to be set in the local environment. Rerun the bootstrap script to refresh the root Application if the registry changes. Ensure the current kubectl context points to the AKS cluster in the supplied resource group. No Argo CD plugin or repo-server environment changes are required.
 
 Both root and child Applications enable automatic sync and self-healing. Automatic pruning and cascading-deletion finalizers are deliberately omitted: removing an app definition does not automatically delete its Application or workloads. Review and remove obsolete resources explicitly.
 
