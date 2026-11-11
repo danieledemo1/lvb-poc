@@ -66,7 +66,7 @@ function az {
 }
 
 $manifest = & $bootstrap -ResourceGroupName 'test-resource-group' -RenderOnly
-if (-not $manifest.Contains("value: 'example.azurecr.io'") -or $manifest.Contains('${REGISTRY_URL}')) {
+if (-not $manifest.Contains("value: 'example.azurecr.io'") -or $manifest.Contains('${REGISTRY_URL}') -or $manifest.Contains('AzureAppConfigurationProvider')) {
     throw 'Bootstrap did not render the discovered registry login server.'
 }
 if ($azureState.RegistryResourceGroup -ne 'test-resource-group' -or $azureState.InvokeCount -ne 0) {
@@ -112,6 +112,52 @@ if ($output -ne $azureState.Result.Logs -or (Test-Path -LiteralPath (Split-Path 
     throw 'Bootstrap must return remote logs and remove its temporary attachments.'
 }
 
+$appConfigurationParameters = @{
+    AppConfigurationEndpoint = 'https://test-store.azconfig.io'
+    AppConfigurationClientId = '11111111-2222-3333-4444-555555555555'
+    AppConfigurationTenantId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+}
+$invokeCount = $azureState.InvokeCount
+$configuredManifest = & $bootstrap -ResourceGroupName 'test-resource-group' -RenderOnly @appConfigurationParameters
+if ($azureState.InvokeCount -ne $invokeCount -or -not $configuredManifest.Contains('kind: AzureAppConfigurationProvider')) {
+    throw 'Render-only bootstrap must include App Configuration resources without invoking AKS when configured.'
+}
+$null = & $bootstrap -ResourceGroupName 'test-resource-group' -ClusterName 'test-cluster' @appConfigurationParameters
+$request = $azureState.Request
+foreach ($expected in @('kind: ServiceAccount', 'name: appconfig-provider', 'namespace: lovable', 'configMapName: lovable-config', 'keyFilter: lovableVersion', 'interval: 1m') + @($appConfigurationParameters.Values)) {
+    if (-not $request.Manifest.Contains($expected)) {
+        throw "The App Configuration manifest is missing '$expected'."
+    }
+}
+if ($request.Manifest.Contains('${APP_CONFIGURATION_') -or -not $request.Manifest.Contains('kind: Application')) {
+    throw 'App Configuration bootstrap must resolve all placeholders and preserve the root Application.'
+}
+foreach ($expected in @('crd/azureappconfigurationproviders.azconfig.io', "--for=jsonpath='{.status.phase}'=Complete", 'azureappconfigurationprovider/lovable-appconfig', 'kubectl get configmap lovable-config --namespace lovable')) {
+    if (-not $request.Command.Contains($expected)) {
+        throw "App Configuration bootstrap must wait for and verify synchronization: missing '$expected'."
+    }
+}
+if (Test-Path -LiteralPath (Split-Path $request.AttachmentPath)) {
+    throw 'App Configuration bootstrap did not remove temporary attachments.'
+}
+
+$invalidConfigurations = @(
+    @{ AppConfigurationEndpoint = 'https://test-store.azconfig.io' }
+    @{ AppConfigurationEndpoint = 'http://test-store.azconfig.io'; AppConfigurationClientId = $appConfigurationParameters.AppConfigurationClientId; AppConfigurationTenantId = $appConfigurationParameters.AppConfigurationTenantId }
+    @{ AppConfigurationEndpoint = $appConfigurationParameters.AppConfigurationEndpoint; AppConfigurationClientId = 'invalid-client-id'; AppConfigurationTenantId = $appConfigurationParameters.AppConfigurationTenantId }
+)
+foreach ($parameters in $invalidConfigurations) {
+    $failure = $null
+    try {
+        $null = & $bootstrap -ResourceGroupName 'test-resource-group' -RenderOnly @parameters
+    } catch {
+        $failure = $_
+    }
+    if ($null -eq $failure -or $failure.Exception.Message -notlike '*AppConfiguration*') {
+        throw "Bootstrap must reject incomplete or invalid App Configuration parameters; received '$failure'."
+    }
+}
+
 $cases = @(
     @{ Result = [pscustomobject]@{ ProvisioningState = 'Succeeded'; ExitCode = 1; Logs = 'kubectl apply failed' }; Error = '*exit code ''1''*kubectl apply failed*' }
     @{ Result = [pscustomobject]@{ ProvisioningState = 'Failed'; ExitCode = 0; Logs = 'Run Command failed' }; Error = '*state ''Failed''*' }
@@ -138,4 +184,4 @@ foreach ($case in $cases) {
     }
 }
 
-Write-Output 'PASS: registry discovery, render-only mode, private-cluster Run Command, remote failures, and temporary-file cleanup.'
+Write-Output 'PASS: registry discovery, render-only mode, private-cluster Run Command, App Configuration rendering and synchronization checks, remote failures, and cleanup.'

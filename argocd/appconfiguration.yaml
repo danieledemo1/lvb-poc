@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lovable
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: appconfig-provider
+  namespace: lovable
+  annotations:
+    azure.workload.identity/client-id: '${APP_CONFIGURATION_CLIENT_ID}'
+    azure.workload.identity/tenant-id: '${APP_CONFIGURATION_TENANT_ID}'
+---
+apiVersion: azconfig.io/v1
+kind: AzureAppConfigurationProvider
+metadata:
+  name: lovable-appconfig
+  namespace: lovable
+spec:
+  endpoint: '${APP_CONFIGURATION_ENDPOINT}'
+  target:
+    configMapName: lovable-config
+  auth:
+    workloadIdentity:
+      serviceAccountName: appconfig-provider
+  configuration:
+    selectors:
+      - keyFilter: lovableVersion
+    refresh:
+      enabled: true
+      interval: 1m

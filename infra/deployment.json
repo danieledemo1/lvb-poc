@@ -2,7 +2,7 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, the Argo CD GitOps extension without ingress or an extension identity, Key Vault, App Configuration and a public Container Registry with authenticated Google Artifact Registry caching. A post-deployment script uses a dedicated user-assigned identity to bootstrap the root Argo CD Application through AKS Run Command. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create custom roles and role assignments at the referenced scopes, Kubernetes extensions, deployment scripts and their supporting storage/container resources, and to assign the bootstrap managed identity.",
+    "description": "Resource-group deployment of the azure-aks-nap cluster with only its system pool, load-balancer egress, supporting identity/DNS, the Argo CD GitOps extension without ingress or an extension identity, Key Vault, App Configuration with its Kubernetes Provider extension and workload identity, and a public Container Registry with authenticated Google Artifact Registry caching. A post-deployment script uses a dedicated user-assigned identity to configure the App Configuration provider and bootstrap the root Argo CD Application through AKS Run Command. The virtual network, subnets and network resource group must already exist. A public IP is created when public Istio ingress is enabled. API-server subnet delegation and subnet routes must support API Server VNet Integration and load-balancer egress. Deployment requires permission to create custom roles and role assignments at the referenced scopes, Kubernetes extensions, deployment scripts and their supporting storage/container resources, and to assign the bootstrap managed identity.",
     "sourceDifferences": "Resource group creation is replaced by the deployment scope. User pools and firewall resources are omitted. Terraform's zero drain timeout is omitted because the AKS API requires 1-1440 minutes; the service default applies. The system pool is untainted so that AKS Run Command pods can schedule. As with other ARM deployments, redeployment reapplies the declared initial node count."
   },
   "parameters": {
@@ -120,7 +120,7 @@
       "defaultValue": "https://raw.githubusercontent.com/danieledemo1/lvb-poc/main/argocd",
       "minLength": 1,
       "metadata": {
-        "description": "Publicly accessible HTTPS base URI containing bootstrap.ps1 and application.yaml, without a trailing slash. Pin a commit-specific URI for reproducible deployments."
+        "description": "Publicly accessible HTTPS base URI containing bootstrap.ps1, application.yaml and appconfiguration.yaml, without a trailing slash. Pin a commit-specific URI for reproducible deployments."
       }
     },
     "bootstrap_force_update_tag": {
@@ -175,6 +175,9 @@
     "subnetIds": "[union(createArray(parameters('system_nodepool_subnet_id')), createArray(parameters('apiserver_subnet_id')))]",
     "keyVaultName": "[format('kv-lvb-{0}', uniqueString(resourceGroup().id, parameters('deployment_id')))]",
     "appConfigurationName": "[format('appcs-lvb-{0}', uniqueString(resourceGroup().id, parameters('deployment_id')))]",
+    "appConfigurationIdentityName": "[format('id-lvbdev-plat-appconfig-{0}-01', parameters('deployment_id'))]",
+    "appConfigurationIdentityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('appConfigurationIdentityName'))]",
+    "appConfigurationReaderRoleAssignmentName": "[guid(resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName')), variables('appConfigurationIdentityId'), '516239f1-63e1-4d78-a4de-a74fb236a071')]",
     "containerRegistryName": "[if(empty(parameters('acr_name')), format('acrlvb{0}', uniqueString(resourceGroup().id, parameters('deployment_id'))), parameters('acr_name'))]",
     "garCredentialSetName": "gar-credentials",
     "garSecretsRoleAssignmentName": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), resourceId('Microsoft.ContainerRegistry/registries/credentialSets', variables('containerRegistryName'), variables('garCredentialSetName')), '4633458b-17de-408a-b874-0445c86b69e6')]"
@@ -193,6 +196,44 @@
       "name": "[variables('bootstrapIdentityName')]",
       "location": "[parameters('location')]",
       "tags": "[variables('tags')]"
+    },
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2024-11-30",
+      "name": "[variables('appConfigurationIdentityName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]"
+    },
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+      "apiVersion": "2024-11-30",
+      "name": "[format('{0}/aks-appconfiguration', variables('appConfigurationIdentityName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('appConfigurationIdentityName'))]",
+        "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]"
+      ],
+      "properties": {
+        "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), '2025-07-01').oidcIssuerProfile.issuerURL]",
+        "subject": "system:serviceaccount:lovable:appconfig-provider",
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('appConfigurationReaderRoleAssignmentName')]",
+      "scope": "[resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('appConfigurationIdentityName'))]",
+        "[resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '516239f1-63e1-4d78-a4de-a74fb236a071')]",
+        "principalId": "[reference(variables('appConfigurationIdentityId'), '2024-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
     },
     {
       "type": "Microsoft.Authorization/roleDefinitions",
@@ -599,6 +640,30 @@
       }
     },
     {
+      "type": "Microsoft.KubernetesConfiguration/extensions",
+      "apiVersion": "2024-11-01",
+      "name": "appconfigurationkubernetesprovider",
+      "scope": "[format('Microsoft.ContainerService/managedClusters/{0}', variables('clusterName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName'))]",
+        "[resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName'))]"
+      ],
+      "properties": {
+        "extensionType": "Microsoft.AppConfiguration",
+        "autoUpgradeMinorVersion": true,
+        "releaseTrain": "Stable",
+        "scope": {
+          "cluster": {
+            "releaseNamespace": "azappconfig-system"
+          }
+        },
+        "configurationSettings": {
+          "global.clusterType": "managedclusters",
+          "workloadIdentity.enabled": "true"
+        }
+      }
+    },
+    {
       "type": "Microsoft.KeyVault/vaults",
       "apiVersion": "2025-05-01",
       "name": "[variables('keyVaultName')]",
@@ -778,6 +843,9 @@
       },
       "dependsOn": [
         "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.KubernetesConfiguration/extensions', 'argocd')]",
+        "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.KubernetesConfiguration/extensions', 'appconfigurationkubernetesprovider')]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', variables('appConfigurationIdentityName'), 'aks-appconfiguration')]",
+        "[extensionResourceId(resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName')), 'Microsoft.Authorization/roleAssignments', variables('appConfigurationReaderRoleAssignmentName'))]",
         "[extensionResourceId(resourceId('Microsoft.ContainerService/managedClusters', variables('clusterName')), 'Microsoft.Authorization/roleAssignments', variables('bootstrapRunCommandRoleAssignmentName'))]",
         "[resourceId('Microsoft.Authorization/roleAssignments', variables('bootstrapReaderRoleAssignmentName'))]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('keyVaultName'), 'bootstrapToken')]",
@@ -791,9 +859,10 @@
         "azPowerShellVersion": "16.2",
         "primaryScriptUri": "[format('{0}/bootstrap.ps1', parameters('bootstrap_artifacts_base_uri'))]",
         "supportingScriptUris": [
-          "[format('{0}/application.yaml', parameters('bootstrap_artifacts_base_uri'))]"
+          "[format('{0}/application.yaml', parameters('bootstrap_artifacts_base_uri'))]",
+          "[format('{0}/appconfiguration.yaml', parameters('bootstrap_artifacts_base_uri'))]"
         ],
-        "arguments": "[format('-ResourceGroupName \"{0}\" -ClusterName \"{1}\"', resourceGroup().name, variables('clusterName'))]",
+        "arguments": "[format('-ResourceGroupName \"{0}\" -ClusterName \"{1}\" -AppConfigurationEndpoint \"{2}\" -AppConfigurationClientId \"{3}\" -AppConfigurationTenantId \"{4}\"', resourceGroup().name, variables('clusterName'), reference(resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigurationName')), '2024-06-01').endpoint, reference(variables('appConfigurationIdentityId'), '2024-11-30').clientId, subscription().tenantId)]",
         "forceUpdateTag": "[parameters('bootstrap_force_update_tag')]",
         "timeout": "PT30M",
         "cleanupPreference": "OnSuccess",

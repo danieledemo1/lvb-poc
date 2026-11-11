@@ -35,9 +35,23 @@ Open `https://localhost:8080` and authenticate using Argo CD's local admin crede
 
 See the [Azure Argo CD extension documentation](https://learn.microsoft.com/azure/azure-arc/kubernetes/tutorial-use-gitops-argocd) for prerequisites and supported configuration.
 
+## AKS App Configuration extension
+
+The template also installs the `Microsoft.AppConfiguration` Kubernetes Provider extension in `azappconfig-system`, with automatic minor-version upgrades and workload identity support.
+
+Installing the extension alone does not connect a store. The post-deployment bootstrap applies `argocd/appconfiguration.yaml`, which creates the `lovable` namespace, an `appconfig-provider` service account, and a `lovable-appconfig` `AzureAppConfigurationProvider` resource. The template supplies the actual endpoint of its App Configuration store and the client/tenant IDs of a dedicated managed identity.
+
+That identity has **App Configuration Data Reader** only on the store created by this template. Its federated credential trusts this cluster's OIDC issuer and exactly `system:serviceaccount:lovable:appconfig-provider`. No connection string or client secret is needed; the Argo CD extension and bootstrap identity permissions are unchanged.
+
+The provider copies the existing unlabeled `lovableVersion` key into the `lovable-config` ConfigMap in the `lovable` namespace, checking for updates every minute. Workloads can consume that ConfigMap; this scaffold does not automatically mount it or inject it into application pods. Edit the provider's selectors to expose additional keys. Key Vault secret resolution is not enabled.
+
+Bootstrap waits for the provider CRD and initial synchronization to complete, then verifies that the target ConfigMap exists. A connection/authentication failure causes bootstrap to fail rather than reporting a successful connection. Azure role assignments may take several minutes to propagate; the synchronization wait is bounded to ten minutes.
+
+The extension namespace must be allowed to use service account tokens. If restrictive Azure Policies apply, review the [App Configuration extension requirements](https://learn.microsoft.com/azure/aks/azure-app-configuration).
+
 ## Automatic post-deployment bootstrap
 
-The ARM template includes an `AzurePowerShell` deployment script that downloads and runs `argocd/bootstrap.ps1`, with `argocd/application.yaml` downloaded alongside it. Its dependencies wait for the Argo CD extension, bootstrap role assignments, and all other template resources to finish before executing.
+The ARM template includes an `AzurePowerShell` deployment script that downloads and runs `argocd/bootstrap.ps1`, with `argocd/application.yaml` and `argocd/appconfiguration.yaml` downloaded alongside it. Its dependencies wait for both Kubernetes extensions, identity credentials and role assignments, and all other template resources to finish before executing.
 
 The deployment script service signs in with a separate user-assigned managed identity. This is not an identity for the Argo CD extension. The bootstrap identity receives:
 
@@ -48,10 +62,10 @@ The template's deployment principal must be able to create custom roles and role
 
 Parameters:
 
-- `bootstrap_artifacts_base_uri`: defaults to `https://raw.githubusercontent.com/danieledemo1/lvb-poc/main/argocd`. Both files must be published before deploying. For reproducible deployments, replace `main` with a commit SHA. A private Git repository cannot be downloaded anonymously: publish these two non-secret artifacts at an accessible HTTPS location and override this parameter.
+- `bootstrap_artifacts_base_uri`: defaults to `https://raw.githubusercontent.com/danieledemo1/lvb-poc/main/argocd`. All three files must be published before deploying. For reproducible deployments, replace `main` with a commit SHA. A private Git repository cannot be downloaded anonymously: publish these non-secret artifacts at an accessible HTTPS location and override this parameter.
 - `bootstrap_force_update_tag`: defaults to the current UTC timestamp, rerunning bootstrap on every deployment. Supply an unchanged value to avoid rerunning an otherwise unchanged script.
 
-The script uses `Get-AzContainerRegistry` and `Invoke-AzAksRunCommand`, so it needs neither Azure CLI nor local Kubernetes credentials. The rendered manifest is uploaded as a ZIP attachment. The in-cluster command waits for the Application CRD, applies the root Application, and reads it back; both failed operations and nonzero remote exit codes fail the deployment script. Temporary attachment files are removed even on failure. This verifies creation of the root Application, not successful synchronization of every child workload.
+The script uses `Get-AzContainerRegistry` and `Invoke-AzAksRunCommand`, so it needs neither Azure CLI nor local Kubernetes credentials. The rendered manifests are uploaded as a ZIP attachment. The in-cluster command waits for the CRDs, applies the App Configuration resources and root Application, and checks their results; both failed operations and nonzero remote exit codes fail the deployment script. Temporary attachment files are removed even on failure. This verifies creation of the root Application and initial App Configuration synchronization, not successful synchronization of every child workload.
 
 Run Command requires schedulable cluster capacity and is subject to AKS command-pod scheduling/time limits. The deployment script uses public Azure management endpoints rather than connecting directly to the private API. Supporting execution resources are cleaned up on success and retained temporarily on failure for diagnostics.
 
@@ -77,6 +91,8 @@ Set-AzContext -Subscription 'my-subscription'
 ```
 
 Pass the resource group containing the AKS cluster and its ACR (not the AKS-managed node resource group). The script uses `Get-AzContainerRegistry` in the active Azure PowerShell subscription and requires exactly one registry in that group. It populates `$registryUrl` from that registry's `LoginServer` and replaces only `${REGISTRY_URL}` in the root Application before applying it through AKS Run Command to `-ClusterName`. Zero or multiple registries, Azure errors, or an invalid login server stop the script. `-RenderOnly` still queries Azure but does not require a cluster name or apply anything to Kubernetes. Do not apply the unrendered template directly.
+
+The ARM deployment additionally supplies `-AppConfigurationEndpoint`, `-AppConfigurationClientId`, and `-AppConfigurationTenantId`. Supply all three together when manually bootstrapping the App Configuration connection; omitting all three preserves root-Application-only bootstrap. These values must correspond to the store and federated identity provisioned by this template.
 
 Argo CD does **not** substitute arbitrary environment variables in Git-hosted Helm values. Instead, the script persists the discovered registry hostname as a Helm parameter on the root Application. The parent chart passes it to each child as `image.registry`; the workload renders an image such as `myregistry.azurecr.io/lovable/first-component:0.1.0`. Registry authentication is handled independently by the workload's `imagePullSecrets`.
 
