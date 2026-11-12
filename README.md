@@ -88,13 +88,27 @@ Edit `lovable-components/workloads/first-component/values.yaml`:
 - The default image is `<registry>/lovable/cyber-hello:latest`; override `image.repository` and `image.tag` if needed.
 - Set `imagePullSecrets` to an existing Kubernetes registry secret.
 - Adjust `service.targetPort` to match the port your image listens on (default: `8080`).
-- Istio ingress is enabled by default: its Gateway listens on HTTP port `80` and its VirtualService forwards every path to the component's ClusterIP service. The selector targets the AKS-managed external gateway (`istio: aks-istio-ingressgateway-external`).
+- Istio ingress is enabled by default: the component's VirtualService forwards every path to its ClusterIP service through the shared Gateway referenced by `ingress.gateway` (default: `lovable/istio-ingress`).
 - `ingress.hosts` defaults to `["*"]`, allowing access by public IP or any hostname. Set it to your DNS hostname(s) to restrict host routing, and point those names at the gateway's public IP. This is plain HTTP without TLS or ingress authentication.
-- Set `ingress.enabled: false` to omit both Istio resources, or override `ingress.gatewaySelector` when using a different Istio gateway.
+- Set `ingress.enabled: false` to omit the component's VirtualService, or override `ingress.gateway` when using a different shared Gateway (`namespace/name`).
 
 Provision the `private-registry` secret in the `lovable` namespace using your secret-management process before the workload starts. The secret must have type `kubernetes.io/dockerconfigjson` and credentials for the registry hostname. Create the namespace first if needed. No registry credentials belong in this repository.
 
-The Istio add-on, its Gateway/VirtualService CRDs, and the external ingress gateway must be installed before syncing the workload. `infra/deployment.json` now defaults `cluster_ingress_public_access` to `true`; apply the infrastructure template with this parameter enabled for an existing internal-only cluster. An explicit `false` still selects the internal gateway instead, requiring a matching workload selector. The private Kubernetes API setting is unchanged.
+### Shared Istio ingress component
+
+The parent chart also deploys the `istio-ingress` Argo CD Application from `lovable-components/workloads/istio-ingress` into `lovable`. This configuration-only chart owns the shared Istio Gateway listening on HTTP port `80`; it does not install an Istio control plane, gateway proxy pods, or a LoadBalancer Service. Those remain managed by the AKS Istio add-on. No application image or registry pull secret is needed for this component.
+
+Configure its `gateway.selector` and `gateway.hosts` in `lovable-components/workloads/istio-ingress/values.yaml`. The default selector is `istio: aks-istio-ingressgateway-external`, and the default hosts allow any hostname. When restricting hosts, ensure each workload's `ingress.hosts` is also allowed by the shared Gateway. Additional workloads should create their own VirtualService referencing `lovable/istio-ingress`, with nonconflicting host/path routes.
+
+The Istio add-on, its Gateway/VirtualService CRDs, and the external ingress gateway must be installed before syncing these components. `infra/deployment.json` defaults `cluster_ingress_public_access` to `true`; apply the infrastructure template with this parameter enabled for an existing internal-only cluster. An explicit `false` still selects the internal gateway instead, requiring a matching shared `gateway.selector`. The private Kubernetes API setting is unchanged.
+
+For an existing installation, sync `istio-ingress`, then sync `first-component`. The parent list does not enforce child synchronization order. Because automatic pruning is disabled, explicitly remove the old workload-owned Gateway after both syncs:
+
+```powershell
+kubectl --namespace lovable delete gateway.networking.istio.io first-component
+```
+
+Do not delete the AKS-managed gateway Deployment or Service.
 
 After infrastructure deployment and Argo CD synchronization, retrieve the gateway address and test HTTP access from outside the cluster:
 
@@ -131,8 +145,8 @@ Both root and child Applications enable automatic sync and self-healing. Automat
 
 1. Add a workload Helm chart beneath `lovable-components/workloads/`, with its own manifests and values.
 2. Add an entry to `lovable-components/values.yaml` under `applications`, specifying a unique `name`, destination `namespace`, and repository-relative chart `path`.
-3. Use the `image.registry` value in the new workload chart so it receives the bootstrap registry hostname.
-4. Provision its registry pull secret in its destination namespace, then commit and push.
+3. For image-based workloads, use the `image.registry` value in the new workload chart so it receives the bootstrap registry hostname.
+4. Provision its registry pull secret in its destination namespace if needed, then commit and push.
 
 The parent renders all listed app definitions. `workloads/` is intentionally not named `charts/`, so Helm does not render workload charts as parent-chart dependencies.
 
@@ -151,6 +165,8 @@ helm lint .\lovable-components --set-string registry.url=registry.example.com
 helm template lovable-components .\lovable-components --namespace argocd --set-string registry.url=registry.example.com
 helm lint .\lovable-components\workloads\first-component --set-string image.registry=registry.example.com
 helm template first-component .\lovable-components\workloads\first-component --namespace lovable --set-string image.registry=registry.example.com
+helm lint .\lovable-components\workloads\istio-ingress
+helm template istio-ingress .\lovable-components\workloads\istio-ingress --namespace lovable
 ```
 
 The registry values intentionally have no default: rendering without an explicit registry fails rather than falling back to a public registry.

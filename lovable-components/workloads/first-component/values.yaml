@@ -15,7 +15,6 @@ service:
 
 ingress:
   enabled: true
-  gatewaySelector:
-    istio: aks-istio-ingressgateway-external
+  gateway: lovable/istio-ingress
   hosts:
     - "*"

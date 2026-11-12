@@ -1,20 +1,5 @@
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.istio.io/v1
-kind: Gateway
-metadata:
-  name: {{ .Release.Name }}
-spec:
-  selector:
-    {{- toYaml .Values.ingress.gatewaySelector | nindent 4 }}
-  servers:
-    - port:
-        number: 80
-        name: http
-        protocol: HTTP
-      hosts:
-        {{- toYaml .Values.ingress.hosts | nindent 8 }}
----
-apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
   name: {{ .Release.Name }}
@@ -22,7 +7,7 @@ spec:
   hosts:
     {{- toYaml .Values.ingress.hosts | nindent 4 }}
   gateways:
-    - {{ .Release.Name }}
+    - {{ required "Set ingress.gateway to the shared Istio Gateway reference." .Values.ingress.gateway | quote }}
   http:
     - match:
         - uri:

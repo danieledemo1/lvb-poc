@@ -1,0 +1,5 @@
+gateway:
+  selector:
+    istio: aks-istio-ingressgateway-external
+  hosts:
+    - "*"

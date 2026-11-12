@@ -6,6 +6,9 @@ registry:
   url: ""
 
 applications:
+  - name: istio-ingress
+    namespace: lovable
+    path: lovable-components/workloads/istio-ingress
   - name: first-component
     namespace: lovable
     path: lovable-components/workloads/first-component
