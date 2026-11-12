@@ -12,3 +12,10 @@ imagePullSecrets:
 service:
   port: 80
   targetPort: 8080
+
+ingress:
+  enabled: true
+  gatewaySelector:
+    istio: aks-istio-ingressgateway-external
+  hosts:
+    - "*"

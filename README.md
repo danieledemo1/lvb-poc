@@ -88,8 +88,23 @@ Edit `lovable-components/workloads/first-component/values.yaml`:
 - The default image is `<registry>/lovable/cyber-hello:latest`; override `image.repository` and `image.tag` if needed.
 - Set `imagePullSecrets` to an existing Kubernetes registry secret.
 - Adjust `service.targetPort` to match the port your image listens on (default: `8080`).
+- Istio ingress is enabled by default: its Gateway listens on HTTP port `80` and its VirtualService forwards every path to the component's ClusterIP service. The selector targets the AKS-managed external gateway (`istio: aks-istio-ingressgateway-external`).
+- `ingress.hosts` defaults to `["*"]`, allowing access by public IP or any hostname. Set it to your DNS hostname(s) to restrict host routing, and point those names at the gateway's public IP. This is plain HTTP without TLS or ingress authentication.
+- Set `ingress.enabled: false` to omit both Istio resources, or override `ingress.gatewaySelector` when using a different Istio gateway.
 
 Provision the `private-registry` secret in the `lovable` namespace using your secret-management process before the workload starts. The secret must have type `kubernetes.io/dockerconfigjson` and credentials for the registry hostname. Create the namespace first if needed. No registry credentials belong in this repository.
+
+The Istio add-on, its Gateway/VirtualService CRDs, and the external ingress gateway must be installed before syncing the workload. `infra/deployment.json` now defaults `cluster_ingress_public_access` to `true`; apply the infrastructure template with this parameter enabled for an existing internal-only cluster. An explicit `false` still selects the internal gateway instead, requiring a matching workload selector. The private Kubernetes API setting is unchanged.
+
+After infrastructure deployment and Argo CD synchronization, retrieve the gateway address and test HTTP access from outside the cluster:
+
+```powershell
+kubectl --namespace aks-istio-ingress get service aks-istio-ingressgateway-external
+$ingressIp = kubectl --namespace aks-istio-ingress get service aks-istio-ingressgateway-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+curl.exe --fail "http://${ingressIp}:80/"
+```
+
+Use the gateway Service's assigned IP; the separately created public IP is not automatically bound to that Service. If using a restricted `ingress.hosts` value before DNS is configured, supply the matching `Host` header when testing.
 
 Push these files to `main` before deploying or bootstrapping; Argo CD reads Git, not your local working tree.
 

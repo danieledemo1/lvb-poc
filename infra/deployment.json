@@ -95,7 +95,7 @@
     },
     "cluster_ingress_public_access": {
       "type": "bool",
-      "defaultValue": false,
+      "defaultValue": true,
       "metadata": {
         "description": "Enable the external Istio ingress gateway and create its public IP. When false, enable the internal gateway instead."
       }
