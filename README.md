@@ -7,6 +7,8 @@ This repository contains two main components:
 
 The root tracks `main` in this repository. Argo CD renders the parent chart into child Applications, then renders each child's workload chart and values into Kubernetes resources.
 
+See the [custom cloud installation flow](DEPLOYMENT-FLOW.md) for an end-to-end flowchart connecting Lovable onboarding, Azure deployment, registry caching, and GitOps bootstrap.
+
 ## Prerequisites
 
 - Argo CD installed in the `argocd` namespace, including its Application CRD.
