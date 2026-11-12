@@ -9,7 +9,18 @@ spec:
   gateways:
     - {{ required "Set ingress.gateway to the shared Istio Gateway reference." .Values.ingress.gateway | quote }}
   http:
-    - route:
+    - match:
+        - uri:
+            exact: /app
+      redirect:
+        uri: /app/
+        redirectCode: 301
+    - match:
+        - uri:
+            prefix: /app/
+      rewrite:
+        uri: /
+      route:
         - destination:
             host: {{ printf "%s.%s.svc.cluster.local" .Release.Name .Release.Namespace | quote }}
             port:

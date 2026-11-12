@@ -9,16 +9,7 @@ spec:
   gateways:
     - {{ .Release.Name }}
   http:
-    - match:
-        - uri:
-            exact: /argocd
-      redirect:
-        uri: /argocd/
-        redirectCode: 301
-    - match:
-        - uri:
-            prefix: /argocd/
-      route:
+    - route:
         - destination:
             host: {{ .Values.argocd.service.host | quote }}
             port:
