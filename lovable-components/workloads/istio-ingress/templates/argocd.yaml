@@ -1,0 +1,26 @@
+{{- if .Values.argocd.enabled }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ .Release.Name }}-argocd
+spec:
+  hosts:
+    {{- toYaml .Values.gateway.hosts | nindent 4 }}
+  gateways:
+    - {{ .Release.Name }}
+  http:
+    - match:
+        - uri:
+            exact: /argocd
+      redirect:
+        uri: /argocd/
+        redirectCode: 301
+    - match:
+        - uri:
+            prefix: /argocd/
+      route:
+        - destination:
+            host: {{ .Values.argocd.service.host | quote }}
+            port:
+              number: {{ .Values.argocd.service.port }}
+{{- end }}

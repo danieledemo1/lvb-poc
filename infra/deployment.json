@@ -647,6 +647,9 @@
         "configurationSettings": {
           "server.ingress.enabled": "false",
           "server.service.type": "ClusterIP",
+          "configs.params.server\\.insecure": "true",
+          "configs.params.server\\.rootpath": "/argocd",
+          "configs.params.server\\.basehref": "/argocd",
           "azure.workloadIdentity.enabled": "false",
           "redis-ha.enabled": "false",
           "global.tolerations[0].key": "CriticalAddonsOnly",

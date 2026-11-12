@@ -3,3 +3,9 @@ gateway:
     istio: aks-istio-ingressgateway-external
   hosts:
     - "*"
+
+argocd:
+  enabled: true
+  service:
+    host: argocd-server.argocd.svc.cluster.local
+    port: 80
