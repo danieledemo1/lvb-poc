@@ -23,7 +23,7 @@ The root uses the `default` Argo CD project. App-of-apps repositories are an adm
 
 `infra/deployment.json` installs the `Microsoft.ArgoCD` GitOps cluster extension in the `argocd` namespace after the AKS cluster is created. Register the `Microsoft.KubernetesConfiguration` resource provider before deployment and ensure the deployment principal has permission to create Kubernetes extensions.
 
-The extension has no managed identity or workload identity configuration and no Entra SSO integration. The AKS cluster's existing managed identity and workload identity support remain unchanged. The chart's built-in ingress is disabled and its server uses a `ClusterIP` service. The shared Istio ingress component exposes the console at `http://<ingress-public-ip>/`.
+The extension has no managed identity or workload identity configuration and no Entra SSO integration. The AKS cluster's existing managed identity and workload identity support remain unchanged. The chart's built-in ingress is disabled and its server uses a `ClusterIP` service. The first component owns `http://<ingress-public-ip>/`; use port-forwarding or a separate host/gateway to access the Argo CD console.
 
 The extension sets `server.insecure=true`, `server.rootpath=""`, and `server.basehref=/` through `configs.params` (literal dots in these parameter names are escaped in the ARM JSON keys). This enables HTTP on service port `80` without an HTTPS redirect and serves Argo CD at the root path. The explicit empty root path clears the previous `/argocd` context on existing installations. Authentication remains enabled, but public HTTP does not encrypt credentials or session traffic; use only in a trusted test environment and use HTTPS for production.
 
@@ -92,8 +92,8 @@ Edit `lovable-components/workloads/first-component/values.yaml`:
 - The default image is `<registry>/lovable/cyber-hello:latest`; override `image.repository` and `image.tag` if needed.
 - Set `imagePullSecrets` to an existing Kubernetes registry secret.
 - Adjust `service.targetPort` to match the port your image listens on (default: `8080`).
-- Istio ingress is enabled by default: the component's VirtualService redirects `/app` to `/app/` and routes `/app/` and its descendants to its ClusterIP service through the shared Gateway referenced by `ingress.gateway` (default: `lovable/istio-ingress`). It strips the `/app` prefix: `/app/assets/main.js` reaches the backend as `/assets/main.js`. Other paths go to Argo CD.
-- The application must generate URLs relative to `/app/` (or use `/app/` as its public base) and configure its client-side router accordingly. Istio only rewrites incoming request paths, not HTML, asset URLs, cookies, or response redirects; absolute URLs such as `/assets/main.js` would reach Argo CD instead. Application source is not included in this repository.
+- Istio ingress is enabled by default: the component's VirtualService matches only the exact path `/` and forwards it unchanged as `/` to its ClusterIP service through the shared Gateway referenced by `ingress.gateway` (default: `lovable/istio-ingress`). There is no redirect or rewrite. Other paths, including `/app`, `/app/`, and `/assets/main.js`, are not routed to this component.
+- Only the root request reaches the application; separate asset URLs and client-side routes are not exposed by this rule. Other paths can still be handled by other VirtualServices, including the shared Argo CD catch-all. Application source is not included in this repository.
 - `ingress.hosts` defaults to `["*"]`, allowing access by public IP or any hostname. Set it to your DNS hostname(s) to restrict host routing, and point those names at the gateway's public IP. This is plain HTTP without TLS or ingress authentication.
 - Set `ingress.enabled: false` to omit the component's VirtualService, or override `ingress.gateway` when using a different shared Gateway (`namespace/name`).
 
@@ -105,7 +105,7 @@ The parent chart also deploys the `istio-ingress` Argo CD Application from `lova
 
 Configure its `gateway.selector` and `gateway.hosts` in `lovable-components/workloads/istio-ingress/values.yaml`. The default selector is `istio: aks-istio-ingressgateway-external`, and the default hosts allow any hostname. When restricting hosts, ensure each workload's `ingress.hosts` is also allowed by the shared Gateway. Additional workloads should create their own VirtualService referencing `lovable/istio-ingress`, with nonconflicting host/path routes.
 
-The same chart creates an Argo CD VirtualService by default (`argocd.enabled: true`). It forwards requests unchanged to `argocd-server.argocd.svc.cluster.local:80` using a route without a `match` field. Istio places this catch-all last when merging gateway-bound VirtualServices, leaving the first component's `/app` redirect and `/app/` route ahead of it. Thus `/` and Argo CD's API and asset paths reach Argo CD, while `/application` does not accidentally match the app route. It uses the shared Gateway's hosts, so the public IP works without DNS with the default wildcard. Do not add a competing `prefix: /` rule or another catch-all for the same hosts and gateway.
+The same chart creates an Argo CD VirtualService by default (`argocd.enabled: true`). It forwards requests unchanged to `argocd-server.argocd.svc.cluster.local:80` using a route without a `match` field. Istio places this catch-all last when merging gateway-bound VirtualServices, leaving the first component's exact `/` route ahead of it. Thus `/` reaches the first component, while other paths reach Argo CD. The console's root page is no longer available on this shared host; use port-forwarding or a separate host/gateway for console access. It uses the shared Gateway's hosts, so the public IP works without DNS with the default wildcard. Do not add a competing `prefix: /` rule or another catch-all for the same hosts and gateway.
 
 Following the [Argo CD Istio ingress documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/ingress/#istio), keep `argocd.service.port: 80` for the HTTP backend with `server.insecure=true`; routing to port `443` does not configure Istio to originate TLS. The documentation's HTTPS listener requires a TLS certificate; this scaffold intentionally retains its existing HTTP-only test gateway.
 
@@ -128,7 +128,6 @@ kubectl --namespace aks-istio-ingress get service aks-istio-ingressgateway-exter
 $ingressIp = kubectl --namespace aks-istio-ingress get service aks-istio-ingressgateway-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
 curl.exe --fail "http://${ingressIp}:80/"
 curl.exe --fail "http://${ingressIp}:80/api/version"
-curl.exe --fail --location "http://${ingressIp}:80/app"
 ```
 
 Use the gateway Service's assigned IP; the separately created public IP is not automatically bound to that Service. If using a restricted `ingress.hosts` value before DNS is configured, supply the matching `Host` header when testing.

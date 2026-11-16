@@ -11,15 +11,7 @@ spec:
   http:
     - match:
         - uri:
-            exact: /app
-      redirect:
-        uri: /app/
-        redirectCode: 301
-    - match:
-        - uri:
-            prefix: /app/
-      rewrite:
-        uri: /
+            exact: /
       route:
         - destination:
             host: {{ printf "%s.%s.svc.cluster.local" .Release.Name .Release.Namespace | quote }}
