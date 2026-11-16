@@ -1,5 +1,0 @@
-apiVersion: v2
-name: istio-ingress
-description: Shared HTTP Gateway configuration for the AKS-managed Istio ingress.
-type: application
-version: 0.1.0
