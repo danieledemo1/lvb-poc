@@ -19,6 +19,14 @@ See the [custom cloud installation flow](DEPLOYMENT-FLOW.md) for an end-to-end f
 
 The root uses the `default` Argo CD project. App-of-apps repositories are an admin-level trust boundary; restrict write access and review changes before syncing.
 
+## Azure Container Registry and Google Artifact Registry cache
+
+The ARM template provisions a Standard Azure Container Registry (ACR) with public network access, while disabling anonymous pulls and the admin account. Its `lovable-gar` cache rule maps Google Artifact Registry (GAR) images from `europe-west8-docker.pkg.dev/project-5cff0794-34e4-48e2-972/test-gar-lvb/*` to `lovable/*` in ACR. Pull images through `<acr-login-server>/lovable/<image>:<tag>` to populate and use the cache. The AKS kubelet identity receives **AcrPull** on this registry; authentication from ACR to GAR is configured separately.
+
+In Google Cloud, create or select a service account, grant it **Artifact Registry Reader** (`roles/artifactregistry.reader`) on the source repository, and create a JSON service-account key if your organization's policy permits key creation. Base64-encode the entire JSON key file as a single line, including any required padding. The ACR credential set `gar-credentials` authenticates to `europe-west8-docker.pkg.dev` using `_json_key_base64` as the username and the encoded key as the password.
+
+Supply that encoded key as the required `serviceKey` secure-string input when triggering the ARM deployment; the deployment UI labels it **Google Artifact Registry service-account key**. The template stores the supplied value unchanged in the **GAR-serviceKey** secret in Azure Key Vault and stores the username in **GAR-username**. The credential set references these secrets, and its system-assigned managed identity receives **Key Vault Secrets User** on the vault to read them. Never commit the JSON key or its base64 representation to this repository; base64 is encoding, not encryption. Rotate the Google key and update the deployment input through your approved secret-management process.
+
 ## AKS Argo CD extension
 
 `infra/deployment.json` installs the `Microsoft.ArgoCD` GitOps cluster extension in the `argocd` namespace after the AKS cluster is created. Register the `Microsoft.KubernetesConfiguration` resource provider before deployment and ensure the deployment principal has permission to create Kubernetes extensions.
