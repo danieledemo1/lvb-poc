@@ -11,7 +11,7 @@ spec:
   http:
     - match:
         - uri:
-            exact: /
+            prefix: /
       route:
         - destination:
             host: {{ printf "%s.%s.svc.cluster.local" .Release.Name .Release.Namespace | quote }}
